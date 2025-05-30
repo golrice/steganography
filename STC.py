@@ -243,6 +243,3 @@ if __name__ == "__main__":
     extracted_message = stc.extract(stego)
     print("Extracted message:", extracted_message.decode())
 
-
-
-
