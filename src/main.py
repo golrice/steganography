@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 import os
-import sys
 import glob
 import imageio
-import scipy.fftpack
-import scipy.signal
 import numpy as np
 import jpeg_toolbox as jt
 from multiprocessing import Pool
@@ -13,26 +10,8 @@ import random
 import tempfile
 import uuid
 from tqdm import tqdm
-import logging
 from datetime import datetime
-
-def setup_logging():
-    """设置日志记录"""
-    log_filename = f"embed_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_filename),
-            logging.StreamHandler()
-        ]
-    )
-
-def dct2(a):
-    return scipy.fftpack.dct(scipy.fftpack.dct(a, axis=0, norm='ortho'), axis=1, norm='ortho')
-
-def idct2(a):
-    return scipy.fftpack.idct(scipy.fftpack.idct(a, axis=0, norm='ortho'), axis=1, norm='ortho')
+from dct_tool import image_to_dct,dct_to_image
 
 def compute_channel_distortion(spatial, target_qf, robustness_qfs):
     """
@@ -42,16 +21,8 @@ def compute_channel_distortion(spatial, target_qf, robustness_qfs):
     :param robustness_qfs: 用于鲁棒性测试的质量因子范围
     :return: 信道失真代价矩阵
     """
-    # 将空域图像转换为JPEG系数
-    height, width = spatial.shape
-    coeffs = np.zeros((height, width), dtype=np.float64)
-    
-    # 计算原始DCT系数(未量化)
-    original_dct_coeffs = np.zeros_like(coeffs, dtype=np.float64)
-    for i in range(0, height, 8):
-        for j in range(0, width, 8):
-            block = spatial[i:i+8, j:j+8]
-            original_dct_coeffs[i:i+8, j:j+8] = dct2(block - 128)
+    # 将空域图像转换为DCT系数
+    original_dct_coeffs,_ = image_to_dct(spatial)
     
     # 计算Δ(i) - 通过多次重压缩计算系数的平均变化
     delta = np.zeros_like(original_dct_coeffs, dtype=np.float64)
@@ -70,11 +41,7 @@ def compute_channel_distortion(spatial, target_qf, robustness_qfs):
             recompressed = recompressed.astype(np.float64)
             
             # 计算重压缩后的DCT系数
-            recompressed_dct_coeffs = np.zeros_like(original_dct_coeffs, dtype=np.float64)
-            for i in range(0, height, 8):
-                for j in range(0, width, 8):
-                    block = recompressed[i:i+8, j:j+8]
-                    recompressed_dct_coeffs[i:i+8, j:j+8] = dct2(block - 128)
+            recompressed_dct_coeffs,_ = image_to_dct(recompressed)
             
             # 计算绝对值变化并累加
             delta += np.abs(np.abs(recompressed_dct_coeffs) - c_abs)
@@ -103,18 +70,13 @@ def embed_message(spatial, payload, target_qf):
     :param target_qf: 目标JPEG质量因子
     :return: 载密图像, 原始消息
     """
-    height, width = spatial.shape
     
     # 1. 计算信道失真代价
     robustness_qfs = range(target_qf+1, 96) if target_qf < 95 else [95]
     channel_distortion = compute_channel_distortion(spatial, target_qf, robustness_qfs)
     
     # 2. 将图像转换为JPEG系数
-    coeffs = np.zeros((height, width), dtype=np.int16)
-    for i in range(0, height, 8):
-        for j in range(0, width, 8):
-            block = spatial[i:i+8, j:j+8]
-            coeffs[i:i+8, j:j+8] = np.round(dct2(block - 128))
+    coeffs,_ = image_to_dct(spatial)
     
     # 3. 准备STC编码
     stcode = [71, 109]
@@ -132,11 +94,7 @@ def embed_message(spatial, payload, target_qf):
     stego_coeffs = stc.embed(coeffs, rho_p1, original_message)
     
     # 5. 将系数转换回空域图像
-    stego_spatial = np.zeros_like(spatial, dtype=np.uint8)
-    for i in range(0, height, 8):
-        for j in range(0, width, 8):
-            block = stego_coeffs[i:i+8, j:j+8]
-            stego_spatial[i:i+8, j:j+8] = np.clip(idct2(block) + 128, 0, 255).astype(np.uint8)
+    stego_spatial = dct_to_image(stego_coeffs)
     
     return stego_spatial, original_message
 
@@ -151,11 +109,7 @@ def extract_message(attacked_spatial, payload, target_qf):
     height, width = attacked_spatial.shape
     
     # 将图像转换为JPEG系数
-    coeffs = np.zeros((height, width), dtype=np.int16)
-    for i in range(0, height, 8):
-        for j in range(0, width, 8):
-            block = attacked_spatial[i:i+8, j:j+8]
-            coeffs[i:i+8, j:j+8] = np.round(dct2(block - 128))
+    coeffs,_ = image_to_dct(attacked_spatial)
     
     # 准备STC解码
     stcode = [71, 109]
@@ -241,13 +195,11 @@ def process_image(args):
         ber = calculate_ber(original_msg, extracted_msg)
 
         print(f"嵌入率 {payload} {image_path}: 误码率={ber}")
-        logging.info(f"嵌入率 {payload} {image_path}: 误码率={ber}")
         
         return os.path.basename(image_path), ber
     
     except Exception as e:
         print(f"Error processing {image_path}: {str(e)}")
-        logging.error(f"Error processing {image_path}: {str(e)}")
         return os.path.basename(image_path), 1.0  # 出错时返回最大BER
 
 def batch_process(pgm_dir, output_csv, payloads, target_qf, attack_qf, num_workers=4):
@@ -322,8 +274,6 @@ if __name__ == "__main__":
     
     # pgm_dir = sys.argv[1]
     # output_csv = sys.argv[2]
-
-    setup_logging()
     
     pgm_dir = "BossBase-1.01"
     output_csv = "res.csv"
