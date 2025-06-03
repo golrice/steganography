@@ -166,8 +166,14 @@ def compute_channel_distortion(spatial, robustness_qfs):
         [72, 92, 95, 98, 112, 100, 103, 99]
     ], dtype=np.float64)
 
+<<<<<<< HEAD
     # 计算原始DCT系数
     original_dct,_ = image_to_dct(spatial_float)
+=======
+    # 计算原始DCT系数（未量化）
+    original_dct,_ = image_to_dct(spatial_float, False)
+    q_original_dct,_ = image_to_dct(spatial_float)
+>>>>>>> 88c8c3de9affe3b98054bb57bd7214f18cbd6d4d
     
     # 计算Δ(i)：通过模拟重压缩的系数变化
     delta = np.zeros_like(original_dct)
@@ -183,12 +189,12 @@ def compute_channel_distortion(spatial, robustness_qfs):
         quantized_dct = np.zeros_like(original_dct)
         for i in range(0, height, 8):
             for j in range(0, width, 8):
-                block = original_dct[i:i+8, j:j+8]
+                block = q_original_dct[i:i+8, j:j+8]
                 quantized = np.round(block / scaled_Q) * scaled_Q  # 量化+反量化
                 quantized_dct[i:i+8, j:j+8] = quantized
         
         # 计算系数绝对值变化
-        delta += np.abs(np.abs(quantized_dct) - c_abs)
+        delta += np.abs(quantized_dct - q_original_dct)
     
     # 计算平均值并加上稳定性项
     delta /= len(robustness_qfs)
@@ -239,6 +245,7 @@ def calculate_ber(original_msg, extracted_msg):
     if len(original_msg) > len(extracted_msg):
         error_bits += 8 * (len(original_msg) - len(extracted_msg))
     
+    print(f"error_bits = {error_bits}, total_bits = {total_bits}")
     return error_bits / total_bits if total_bits > 0 else 1.0
 
 if __name__ == "__main__":
@@ -277,3 +284,14 @@ if __name__ == "__main__":
     # 8. 计算误码率
     ber = calculate_ber(original_message, extracted_message)
     print(f"误码率(BER): {ber:.6f}")
+
+    # 测试仅仅使用dct和idct
+    stego_img = dct_to_image(stego_coeffs)
+    stego_coeffs, _ = image_to_dct(stego_img)
+    extracted_message2 = stc.extract(stego_coeffs)[:(len(original_message))]
+    
+    # 8. 计算误码率
+    ber = calculate_ber(extracted_message, extracted_message2)
+    print(f"误码率(BER): {ber:.6f}")
+
+
