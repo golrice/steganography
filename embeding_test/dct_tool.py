@@ -40,9 +40,9 @@ def adaptive_quantization(dct_block, scaled_Q, qf):
 
     # 动态调整量化步长 [1,2,6](@ref)
     if high_freq_energy > 1000 or freq_center > 5:  # 高频丰富区域
-        return np.round(dct_block / (scaled_Q * 0.7))  # 精细量化
+        return np.round(dct_block / (scaled_Q * 0.64))  # 精细量化
     elif high_freq_energy < 300 and freq_center < 3:  # 低频平滑区域
-        return np.round(dct_block / (scaled_Q * 1.3))  # 粗量化
+        return np.round(dct_block / (scaled_Q * 1.36))  # 粗量化
     else:  # 中频区域
         return np.round(dct_block / scaled_Q)
 
