@@ -270,7 +270,7 @@ if __name__ == "__main__":
     stego_coeffs = stc.embed(coeffs, distortion.copy(), original_message)
     
     # 6. 生成载密图像
-    stego_img = dct_to_image(stego_coeffs,use_quantization=True)
+    stego_img = dct_to_image(stego_coeffs,use_quantization=True,scaled_Q=q_table)
     imageio.imwrite(output_path, stego_img)
     
     # 7. 提取测试
@@ -282,7 +282,7 @@ if __name__ == "__main__":
     print(f"jpeg压缩后的误码率(BER): {ber:.6f} \n")
 
     # 测试仅仅使用dct和idct
-    stego_img = dct_to_image(stego_coeffs)
+    stego_img = dct_to_image(stego_coeffs,use_quantization=True,scaled_Q=q_table)
     stego_coeffs2, _ = image_to_dct(stego_img)
     extracted_message2 = stc.extract(stego_coeffs2)[:(len(original_message))]
     ber = calculate_ber(original_message, extracted_message2)
