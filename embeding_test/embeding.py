@@ -166,14 +166,9 @@ def compute_channel_distortion(spatial, robustness_qfs):
         [72, 92, 95, 98, 112, 100, 103, 99]
     ], dtype=np.float64)
 
-<<<<<<< HEAD
-    # 计算原始DCT系数
-    original_dct,_ = image_to_dct(spatial_float)
-=======
     # 计算原始DCT系数（未量化）
     original_dct,_ = image_to_dct(spatial_float, False)
     q_original_dct,_ = image_to_dct(spatial_float)
->>>>>>> 88c8c3de9affe3b98054bb57bd7214f18cbd6d4d
     
     # 计算Δ(i)：通过模拟重压缩的系数变化
     delta = np.zeros_like(original_dct)
@@ -258,7 +253,9 @@ if __name__ == "__main__":
     # 使用JPEG平均代价
     robustness_qfs = range(71, 96)
     
-    distortion = compute_channel_distortion_j_uniward(img, robustness_qfs)
+    distortion = compute_channel_distortion(img, robustness_qfs)
+    # distortion = compute_channel_distortion_j_uniward(img, robustness_qfs)
+    # distortion = compute_channel_distortion_fixed(img, robustness_qfs)
 
     # 3. 转换为DCT系数
     coeffs, q_table = image_to_dct(img,use_quantization=True)
@@ -277,21 +274,23 @@ if __name__ == "__main__":
     imageio.imwrite(output_path, stego_img)
     
     # 7. 提取测试
+    # 用jpeg压缩保存并重新提取
     stego_img = load_image(output_path)
-    stego_coeffs, _ = image_to_dct(stego_img)
-    extracted_message = stc.extract(stego_coeffs)[:(len(original_message))]
-    
-    # 8. 计算误码率
+    stego_coeffs1, _ = image_to_dct(stego_img)
+    extracted_message = stc.extract(stego_coeffs1)[:(len(original_message))]
     ber = calculate_ber(original_message, extracted_message)
-    print(f"误码率(BER): {ber:.6f}")
+    print(f"jpeg压缩后的误码率(BER): {ber:.6f} \n")
 
     # 测试仅仅使用dct和idct
     stego_img = dct_to_image(stego_coeffs)
-    stego_coeffs, _ = image_to_dct(stego_img)
-    extracted_message2 = stc.extract(stego_coeffs)[:(len(original_message))]
-    
-    # 8. 计算误码率
-    ber = calculate_ber(extracted_message, extracted_message2)
-    print(f"误码率(BER): {ber:.6f}")
+    stego_coeffs2, _ = image_to_dct(stego_img)
+    extracted_message2 = stc.extract(stego_coeffs2)[:(len(original_message))]
+    ber = calculate_ber(original_message, extracted_message2)
+    print(f"dct量化并逆变换后的误码率(BER): {ber:.6f}\n")
+
+    # 测试不做任何操作直接提取
+    extracted_message3 = stc.extract(stego_coeffs)[:(len(original_message))]
+    ber = calculate_ber(original_message, extracted_message3)
+    print(f"不做变换直接提取的误码率(BER): {ber:.6f}\n")
 
 
