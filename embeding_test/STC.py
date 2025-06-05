@@ -70,6 +70,7 @@ class STC:
             (7,2),(7,3),(6,4),(5,5),(4,6),(3,7),(4,7),(5,6),
             (6,5),(7,4),(7,5),(6,6),(5,7),(6,7),(7,6),(7,7)
         ]
+        self.record_pos = []
         # }}}
     
     def _dual_viterbi(self, x, w, m):
@@ -191,12 +192,14 @@ class STC:
             m_chunk = message_bits[j:j+ml][:,np.newaxis]
             w_chunk = w[i:i+self.code_n][:,np.newaxis]
             y_chunk, min_cost, _ = self._dual_viterbi(x_chunk, w_chunk, m_chunk)
-            idx = x_chunk[:,0] != y_chunk[:,0]
-            y[i:i+self.code_n][idx] += 1
+            if min_cost < 100000:
+                idx = x_chunk[:,0] != y_chunk[:,0]
+                y[i:i+self.code_n][idx] += 1
+                j += ml
             i += self.code_n
-            j += ml
             if i+self.code_n>len(x) or j+ml>len(message_bits):
                 break
+        print(f"counts = {j / ml}")
         return np.vstack(y).reshape(shape)
         # }}}
 
@@ -204,7 +207,8 @@ class STC:
         # {{{ extract()
         y = stego.flatten()
         message = []
-        for i in range(0, len(y), self.code_n):
+        # for i in range(0, len(y), self.code_n):
+        for i in self.record_pos:
             y_chunk = y[i:i+self.code_n][:,np.newaxis]%2
             if len(y_chunk)<self.code_n:
                 break

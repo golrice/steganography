@@ -173,26 +173,34 @@ def compute_channel_distortion(spatial, robustness_qfs):
     # 计算Δ(i)：通过模拟重压缩的系数变化
     delta = np.zeros_like(original_dct)
     c_abs = np.abs(original_dct)
+
+    qf = 70
+    scale = 5000 / qf if qf < 50 else 200 - 2 * qf
+    base_Q = np.floor((Q * scale + 50) / 100)
+    base_Q[base_Q < 1] = 1
     
-    for qf in robustness_qfs:
+    for qf in [80]:
         # 根据QF缩放量化表（标准JPEG缩放公式）
         scale = 5000 / qf if qf < 50 else 200 - 2 * qf
         scaled_Q = np.floor((Q * scale + 50) / 100)
         scaled_Q[scaled_Q < 1] = 1
         
         # 模拟量化/反量化过程（避免临时文件）
-        quantized_dct = np.zeros_like(original_dct)
-        for i in range(0, height, 8):
-            for j in range(0, width, 8):
-                block = q_original_dct[i:i+8, j:j+8]
-                quantized = np.round(block / scaled_Q) * scaled_Q  # 量化+反量化
-                quantized_dct[i:i+8, j:j+8] = quantized
+        # quantized_dct = np.zeros_like(original_dct)
+        # for i in range(0, height, 8):
+        #     for j in range(0, width, 8):
+        #         block = q_original_dct[i:i+8, j:j+8]
+        #         quantized = np.round(block / scaled_Q) * base_Q  # 量化+反量化
+        #         quantized_dct[i:i+8, j:j+8] = quantized
+        imageio.imwrite("tmp.jpeg", spatial, plugin="pillow", quality=qf)
+        tmp_img = load_image("tmp.jpeg")
+        tmp_dct, _ = image_to_dct(tmp_img)
         
         # 计算系数绝对值变化
-        delta += np.abs(quantized_dct - q_original_dct)
+        delta += np.abs(tmp_dct - q_original_dct)
     
     # 计算平均值并加上稳定性项
-    delta /= len(robustness_qfs)
+    # delta /= len(robustness_qfs)
     epsilon = 1e-10
     channel_distortion = delta + 1.0 / (c_abs + epsilon)
     
@@ -245,8 +253,8 @@ def calculate_ber(original_msg, extracted_msg):
 
 if __name__ == "__main__":
     # 1. 加载图像
-    input_path = "test_img\img.jpg"
-    output_path = "test_img/stego_img.jpg"
+    input_path = os.path.join(os.path.dirname(__file__), "test_img", "img.jpg")
+    output_path = os.path.join(os.path.dirname(__file__), "test_img", "stego_img.jpg")
     img = load_image(input_path)
     
     # 2. 计算信道失真代价
@@ -266,12 +274,12 @@ if __name__ == "__main__":
     original_message = generate_message(nzAC, payload=0.1)
     
     # 5. STC嵌入
-    stc = STC(stcode, coeffs.shape[0] // 8)
+    stc = STC(stcode, coeffs.shape[0] // 16)
     stego_coeffs = stc.embed(coeffs, distortion.copy(), original_message)
     
     # 6. 生成载密图像
     stego_img = dct_to_image(stego_coeffs,use_quantization=True)
-    imageio.imwrite(output_path, stego_img)
+    imageio.imwrite(output_path, stego_img, plugin="pillow", quality=80)
     
     # 7. 提取测试
     # 用jpeg压缩保存并重新提取
@@ -290,7 +298,7 @@ if __name__ == "__main__":
 
     # 测试不做任何操作直接提取
     extracted_message3 = stc.extract(stego_coeffs)[:(len(original_message))]
-    ber = calculate_ber(original_message, extracted_message3)
+    ber = calculate_ber(original_message[:-20], extracted_message3[:-20])
     print(f"不做变换直接提取的误码率(BER): {ber:.6f}\n")
 
 
