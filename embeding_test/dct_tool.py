@@ -40,17 +40,19 @@ def image_to_dct(img, use_quantization=True, qf=70):
     
     return coeffs, scaled_Q if use_quantization else None
 
-def dct_to_image(coeffs, use_quantization=True):
+def dct_to_image(coeffs, use_quantization=True, qf=70):
     """DCT系数转图像"""
     height, width = coeffs.shape
     img = np.zeros((height, width), dtype=np.uint8)
+    scale = 5000 / qf if qf < 50 else 200 - 2 * qf
+    scaled_Q = np.clip(np.floor((Q * scale + 50) / 100), 1, None)
     
     for i in range(0, height, 8):
         for j in range(0, width, 8):
             block = coeffs[i:i+8, j:j+8]
             
             if use_quantization:
-                block = block * Q  # 反量化
+                block = block * scaled_Q  # 反量化
             
             img[i:i+8, j:j+8] = np.clip(idct2(block) + 128, 0, 255).astype(np.uint8)
     

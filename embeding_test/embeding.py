@@ -173,34 +173,26 @@ def compute_channel_distortion(spatial, robustness_qfs):
     # 计算Δ(i)：通过模拟重压缩的系数变化
     delta = np.zeros_like(original_dct)
     c_abs = np.abs(original_dct)
-
-    qf = 70
-    scale = 5000 / qf if qf < 50 else 200 - 2 * qf
-    base_Q = np.floor((Q * scale + 50) / 100)
-    base_Q[base_Q < 1] = 1
     
-    for qf in [80]:
+    for qf in robustness_qfs:
         # 根据QF缩放量化表（标准JPEG缩放公式）
         scale = 5000 / qf if qf < 50 else 200 - 2 * qf
         scaled_Q = np.floor((Q * scale + 50) / 100)
         scaled_Q[scaled_Q < 1] = 1
         
         # 模拟量化/反量化过程（避免临时文件）
-        # quantized_dct = np.zeros_like(original_dct)
-        # for i in range(0, height, 8):
-        #     for j in range(0, width, 8):
-        #         block = q_original_dct[i:i+8, j:j+8]
-        #         quantized = np.round(block / scaled_Q) * base_Q  # 量化+反量化
-        #         quantized_dct[i:i+8, j:j+8] = quantized
-        imageio.imwrite("tmp.jpeg", spatial, plugin="pillow", quality=qf)
-        tmp_img = load_image("tmp.jpeg")
-        tmp_dct, _ = image_to_dct(tmp_img)
+        quantized_dct = np.zeros_like(original_dct)
+        for i in range(0, height, 8):
+            for j in range(0, width, 8):
+                block = q_original_dct[i:i+8, j:j+8]
+                quantized = np.round(block / scaled_Q) * scaled_Q  # 量化+反量化
+                quantized_dct[i:i+8, j:j+8] = quantized
         
         # 计算系数绝对值变化
-        delta += np.abs(tmp_dct - q_original_dct)
+        delta += np.abs(quantized_dct - q_original_dct)
     
     # 计算平均值并加上稳定性项
-    # delta /= len(robustness_qfs)
+    delta /= len(robustness_qfs)
     epsilon = 1e-10
     channel_distortion = delta + 1.0 / (c_abs + epsilon)
     
@@ -251,10 +243,32 @@ def calculate_ber(original_msg, extracted_msg):
     print(f"error_bits = {error_bits}, total_bits = {total_bits}")
     return error_bits / total_bits if total_bits > 0 else 1.0
 
+def get_low_freq_indices(distortion, block_size=8, freq_cutoff=4, threshold=100):
+    """
+    返回所有 8×8 block 中左上角 freq_cutoff×freq_cutoff 区域（排除DC），
+    且 distortion < threshold 的系数索引。
+    """
+    h, w = distortion.shape
+    selected_indices = []
+
+    for i in range(0, h, block_size):
+        for j in range(0, w, block_size):
+            block = distortion[i:i+block_size, j:j+block_size]
+
+            # 遍历左上角低频区域，跳过 DC 位（[0, 0]）
+            for u in range(freq_cutoff):
+                for v in range(freq_cutoff):
+                    if u == 0 and v == 0:
+                        continue
+                    if block[u, v] < threshold:
+                        selected_indices.append((i + u, j + v))
+
+    return tuple(np.array(selected_indices).T)  # 返回 (row_indices, col_indices)
+
 if __name__ == "__main__":
     # 1. 加载图像
-    input_path = os.path.join(os.path.dirname(__file__), "test_img", "img.jpg")
-    output_path = os.path.join(os.path.dirname(__file__), "test_img", "stego_img.jpg")
+    input_path = "test_img/img.jpg"
+    output_path = "test_img/stego_img.jpg"
     img = load_image(input_path)
     
     # 2. 计算信道失真代价
@@ -264,6 +278,7 @@ if __name__ == "__main__":
     distortion = compute_channel_distortion(img, robustness_qfs)
     # distortion = compute_channel_distortion_j_uniward(img, robustness_qfs)
     # distortion = compute_channel_distortion_fixed(img, robustness_qfs)
+    indices = get_low_freq_indices(distortion, block_size=8, freq_cutoff=3, threshold=100)
 
     # 3. 转换为DCT系数
     coeffs, q_table = image_to_dct(img,use_quantization=True)
@@ -274,31 +289,34 @@ if __name__ == "__main__":
     original_message = generate_message(nzAC, payload=0.1)
     
     # 5. STC嵌入
-    stc = STC(stcode, coeffs.shape[0] // 16)
-    stego_coeffs = stc.embed(coeffs, distortion.copy(), original_message)
+    stc = STC(stcode, coeffs.shape[0] // 8)
+    coeffs[indices] = stc.embed(coeffs[indices], distortion[indices].copy(), original_message)
+    stego_coeffs = coeffs.copy()
     
     # 6. 生成载密图像
     stego_img = dct_to_image(stego_coeffs,use_quantization=True)
-    imageio.imwrite(output_path, stego_img, plugin="pillow", quality=80)
+    imageio.imwrite(output_path, stego_img)
     
     # 7. 提取测试
     # 用jpeg压缩保存并重新提取
     stego_img = load_image(output_path)
-    stego_coeffs1, _ = image_to_dct(stego_img)
-    extracted_message = stc.extract(stego_coeffs1)[:(len(original_message))]
-    ber = calculate_ber(original_message, extracted_message)
+    stego_coeffs1, _ = image_to_dct(stego_img, True)
+    extracted_message = stc.extract(stego_coeffs1[indices])[:(len(original_message))]
+    ber = calculate_ber(original_message[:-16], extracted_message[:-16])
     print(f"jpeg压缩后的误码率(BER): {ber:.6f} \n")
 
     # 测试仅仅使用dct和idct
     stego_img = dct_to_image(stego_coeffs)
     stego_coeffs2, _ = image_to_dct(stego_img)
-    extracted_message2 = stc.extract(stego_coeffs2)[:(len(original_message))]
-    ber = calculate_ber(original_message, extracted_message2)
+    extracted_message2 = stc.extract(stego_coeffs2[indices])[:(len(original_message))]
+    ber = calculate_ber(original_message[:-16], extracted_message2[:-16])
     print(f"dct量化并逆变换后的误码率(BER): {ber:.6f}\n")
+    error = np.max(np.abs(stego_coeffs - stego_coeffs2))
+    print(f"最大往返误差: {error}")
 
     # 测试不做任何操作直接提取
-    extracted_message3 = stc.extract(stego_coeffs)[:(len(original_message))]
-    ber = calculate_ber(original_message[:-20], extracted_message3[:-20])
+    extracted_message3 = stc.extract(stego_coeffs[indices])[:(len(original_message))]
+    ber = calculate_ber(original_message[:-16], extracted_message3[:-16])
     print(f"不做变换直接提取的误码率(BER): {ber:.6f}\n")
 
 

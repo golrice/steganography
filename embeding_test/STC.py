@@ -50,27 +50,12 @@ class STC:
 
         H = np.zeros((k+n-1, m*k))
         for i in range(k):
-            H[i:i+n, m*i:m*(i+1)] = H_hat
+            H[i:i+n, m*i:m*(i+1)] = H_hat;
 
-        # 总载体长度 bit数
         self.code_n = m*k
-        # 每个 stcode 的 bit 宽度
         self.code_l = n_bits
-        # 修改指示位
         self.code_h = np.tile(stcode, k)
-        # dp转移位
         self.code_shift = np.tile([0]*(m-1)+[1], k)
-        self.zigzag_indices = [
-            (0,0),(0,1),(1,0),(2,0),(1,1),(0,2),(0,3),(1,2),
-            (2,1),(3,0),(4,0),(3,1),(2,2),(1,3),(0,4),(0,5),
-            (1,4),(2,3),(3,2),(4,1),(5,0),(6,0),(5,1),(4,2),
-            (3,3),(2,4),(1,5),(0,6),(0,7),(1,6),(2,5),(3,4),
-            (4,3),(5,2),(6,1),(7,0),(7,1),(6,2),(5,3),(4,4),
-            (3,5),(2,6),(1,7),(2,7),(3,6),(4,5),(5,4),(6,3),
-            (7,2),(7,3),(6,4),(5,5),(4,6),(3,7),(4,7),(5,6),
-            (6,5),(7,4),(7,5),(6,6),(5,7),(6,7),(7,6),(7,7)
-        ]
-        self.record_pos = []
         # }}}
     
     def _dual_viterbi(self, x, w, m):
@@ -172,9 +157,6 @@ class STC:
 
         return bytes(enc)
         # }}}
-    
-    def _transform_block2zigzag(self, block):
-        return [block[i, j] for i, j in self.zigzag_indices]
 
     def embed(self, cover, costs, message):
         # {{{
@@ -192,14 +174,12 @@ class STC:
             m_chunk = message_bits[j:j+ml][:,np.newaxis]
             w_chunk = w[i:i+self.code_n][:,np.newaxis]
             y_chunk, min_cost, _ = self._dual_viterbi(x_chunk, w_chunk, m_chunk)
-            if min_cost < 100000:
-                idx = x_chunk[:,0] != y_chunk[:,0]
-                y[i:i+self.code_n][idx] += 1
-                j += ml
+            idx = x_chunk[:,0] != y_chunk[:,0]
+            y[i:i+self.code_n][idx] += 1
             i += self.code_n
+            j += ml
             if i+self.code_n>len(x) or j+ml>len(message_bits):
                 break
-        print(f"counts = {j / ml}")
         return np.vstack(y).reshape(shape)
         # }}}
 
@@ -207,8 +187,7 @@ class STC:
         # {{{ extract()
         y = stego.flatten()
         message = []
-        # for i in range(0, len(y), self.code_n):
-        for i in self.record_pos:
+        for i in range(0, len(y), self.code_n):
             y_chunk = y[i:i+self.code_n][:,np.newaxis]%2
             if len(y_chunk)<self.code_n:
                 break
