@@ -50,7 +50,7 @@ class STC:
 
         H = np.zeros((k+n-1, m*k))
         for i in range(k):
-            H[i:i+n, m*i:m*(i+1)] = H_hat;
+            H[i:i+n, m*i:m*(i+1)] = H_hat
 
         self.code_n = m*k
         self.code_l = n_bits

@@ -4,65 +4,160 @@ import glob
 import imageio
 import numpy as np
 import jpeg_toolbox as jt
+import scipy.signal
 from multiprocessing import Pool
 from STC import STC
 import random
 import tempfile
 import uuid
 from tqdm import tqdm
-from datetime import datetime
-from dct_tool import image_to_dct,dct_to_image
+from dct_tool import image_to_dct,dct_to_image,idct2
 
-def compute_channel_distortion(spatial, target_qf, robustness_qfs):
+stcode = [7,11,15]
+k = 64
+
+def j_uniward_distortion(spatial, jpg):
+
+    hpdf = np.array([
+        -0.0544158422,  0.3128715909, -0.6756307363,  0.5853546837,  
+         0.0158291053, -0.2840155430, -0.0004724846,  0.1287474266,  
+         0.0173693010, -0.0440882539, -0.0139810279,  0.0087460940,  
+         0.0048703530, -0.0003917404, -0.0006754494, -0.0001174768
+    ])        
+
+    sign = np.array([-1 if i%2 else 1 for i in range(len(hpdf))])
+    lpdf = hpdf[::-1] * sign
+
+    F = []
+    F.append(np.outer(lpdf.T, hpdf))
+    F.append(np.outer(hpdf.T, lpdf))
+    F.append(np.outer(hpdf.T, hpdf))
+
+
+    # Pre-compute impact in spatial domain when a jpeg coefficient is changed by 1
+    spatial_impact = {}
+    for i in range(8):
+        for j in range(8):
+            test_coeffs = np.zeros((8, 8))
+            test_coeffs[i, j] = 1
+            spatial_impact[i, j] = idct2(test_coeffs) * jpg["quant_tables"][0][i, j]
+
+    # Pre compute impact on wavelet coefficients when a jpeg coefficient is changed by 1
+    wavelet_impact = {}
+    for f_index in range(len(F)):
+        for i in range(8):
+            for j in range(8):
+                wavelet_impact[f_index, i, j] = scipy.signal.correlate2d(spatial_impact[i, j], F[f_index], mode='full', boundary='fill', fillvalue=0.) # XXX
+
+
+    # Create reference cover wavelet coefficients (LH, HL, HH)
+    pad_size = 16 # XXX
+    spatial_padded = np.pad(spatial, (pad_size, pad_size), 'symmetric')
+    #print(spatial_padded.shape)
+
+    RC = []
+    for i in range(len(F)):
+        f = scipy.signal.correlate2d(spatial_padded, F[i], mode='same', boundary='fill')
+        RC.append(f)
+
+
+    coeffs = jpg["coef_arrays"][0]
+    k, l = coeffs.shape
+    nzAC = np.count_nonzero(jpg["coef_arrays"][0]) - np.count_nonzero(jpg["coef_arrays"][0][::8, ::8])
+
+    rho = np.zeros((k, l))
+    tempXi = [0.]*3
+    sgm = 2**(-6)
+
+    # Computation of costs
+    for row in range(k):
+        for col in range(l):
+            mod_row = row % 8
+            mod_col = col % 8
+            sub_rows = list(range(row-mod_row-6+pad_size-1, row-mod_row+16+pad_size))
+            sub_cols = list(range(col-mod_col-6+pad_size-1, col-mod_col+16+pad_size))
+
+            for f_index in range(3):
+                RC_sub = RC[f_index][sub_rows][:,sub_cols]
+                wav_cover_stego_diff = wavelet_impact[f_index, mod_row, mod_col]
+                tempXi[f_index] = abs(wav_cover_stego_diff) / (abs(RC_sub)+sgm)
+
+            rho_temp = tempXi[0] + tempXi[1] + tempXi[2]
+            rho[row, col] = np.sum(rho_temp)
+
+
+    wet_cost = 10**13
+    rho_m1 = rho.copy()
+    rho_p1 = rho.copy()
+
+    rho_p1[rho_p1>wet_cost] = wet_cost
+    rho_p1[np.isnan(rho_p1)] = wet_cost
+    rho_p1[coeffs>1023] = wet_cost
+
+    rho_m1[rho_m1>wet_cost] = wet_cost
+    rho_m1[np.isnan(rho_m1)] = wet_cost
+    rho_m1[coeffs<-1023] = wet_cost
+
+    return np.minimum(rho_p1, rho_m1)  # 选择代价较小的修改方式
+
+def compute_channel_distortion(spatial, robustness_qfs):
     """
     计算信道失真代价
-    :param spatial: 空域图像数据
-    :param target_qf: 目标质量因子
+    :param spatial: 空域图像数据 (uint8)
     :param robustness_qfs: 用于鲁棒性测试的质量因子范围
     :return: 信道失真代价矩阵
     """
-    # 将空域图像转换为DCT系数
-    original_dct_coeffs,_ = image_to_dct(spatial)
+    height, width = spatial.shape
+    spatial_float = spatial.astype(np.float64) - 128  # JPEG标准中心化
     
-    # 计算Δ(i) - 通过多次重压缩计算系数的平均变化
-    delta = np.zeros_like(original_dct_coeffs, dtype=np.float64)
-    c_abs = np.abs(original_dct_coeffs)
+    # 标准JPEG亮度量化表（根据QF缩放）
+    Q = np.array([
+        [16, 11, 10, 16, 24, 40, 51, 61],
+        [12, 12, 14, 19, 26, 58, 60, 55],
+        [14, 13, 16, 24, 40, 57, 69, 56],
+        [14, 17, 22, 29, 51, 87, 80, 62],
+        [18, 22, 37, 56, 68, 109, 103, 77],
+        [24, 35, 55, 64, 81, 104, 113, 92],
+        [49, 64, 78, 87, 103, 121, 120, 101],
+        [72, 92, 95, 98, 112, 100, 103, 99]
+    ], dtype=np.float64)
+
+    # 计算原始DCT系数
+    original_dct,_ = image_to_dct(spatial_float, False)
+    q_original_dct,_ = image_to_dct(spatial_float)
+    
+    # 计算Δ(i)：通过模拟重压缩的系数变化
+    delta = np.zeros_like(original_dct)
+    c_abs = np.abs(original_dct)
     
     for qf in robustness_qfs:
-        # 使用唯一临时文件名
-        temp_path = os.path.join(tempfile.gettempdir(), f"temp_{uuid.uuid4().hex}.jpg")
-        try:
-            imageio.imwrite(temp_path, spatial.astype(np.uint8), quality=qf)
-            
-            # 重新加载并计算DCT系数
-            recompressed = imageio.imread(temp_path)
-            if len(recompressed.shape) == 3:
-                recompressed = np.mean(recompressed, axis=2)
-            recompressed = recompressed.astype(np.float64)
-            
-            # 计算重压缩后的DCT系数
-            recompressed_dct_coeffs,_ = image_to_dct(recompressed)
-            
-            # 计算绝对值变化并累加
-            delta += np.abs(np.abs(recompressed_dct_coeffs) - c_abs)
-        finally:
-            # 确保临时文件被删除
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+        # 根据QF缩放量化表（标准JPEG缩放公式）
+        scale = 5000 / qf if qf < 50 else 200 - 2 * qf
+        scaled_Q = np.floor((Q * scale + 50) / 100)
+        scaled_Q[scaled_Q < 1] = 1
+        
+        # 模拟量化/反量化过程（避免临时文件）
+        quantized_dct = np.zeros_like(original_dct)
+        for i in range(0, height, 8):
+            for j in range(0, width, 8):
+                block = q_original_dct[i:i+8, j:j+8]
+                quantized = np.round(block / scaled_Q) * scaled_Q  # 量化+反量化
+                quantized_dct[i:i+8, j:j+8] = quantized
+        
+        # 计算系数绝对值变化
+        delta += np.abs(quantized_dct - q_original_dct)
     
-    # 计算平均值
+    # 计算平均值并加上稳定性项
     delta /= len(robustness_qfs)
-    
-    # 计算最终信道失真代价 d(i) = Δ(i) + 1/abs(c(i))
-    epsilon = 1e-10
+    epsilon = 1e-13
     channel_distortion = delta + 1.0 / (c_abs + epsilon)
     
-    # 对于DC系数设置极高的代价
+    # 标记所有DC系数（左上角系数）为高代价
     channel_distortion[::8, ::8] = 1e13
     
     return channel_distortion
 
-def embed_message(spatial, payload, target_qf):
+def embed_message(spatial, payload, target_qf, attack_qf):
     """
     在图像中嵌入消息
     :param spatial: 空域图像数据
@@ -71,15 +166,27 @@ def embed_message(spatial, payload, target_qf):
     :return: 载密图像, 原始消息
     """
     
+    temp_path = os.path.join(tempfile.gettempdir(), f"temp_{uuid.uuid4().hex}.jpg")
+    try:
+        imageio.imwrite(temp_path, spatial)
+        jpg = jt.load(temp_path)
+    finally:
+        # 确保临时文件被删除
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+    channel_distortion = j_uniward_distortion(spatial,jpg)
+
+
     # 1. 计算信道失真代价
-    robustness_qfs = range(target_qf+1, 96) if target_qf < 95 else [95]
-    channel_distortion = compute_channel_distortion(spatial, target_qf, robustness_qfs)
+    # robustness_qfs = range(target_qf, 96) if target_qf < 95 else [95]
+    # channel_distortion = compute_channel_distortion(spatial, robustness_qfs)
+    
+
     
     # 2. 将图像转换为JPEG系数
-    coeffs,_ = image_to_dct(spatial)
+    coeffs, Q_table = image_to_dct(spatial,use_quantization=True,qf=target_qf)
     
     # 3. 准备STC编码
-    stcode = [71, 109]
     nzAC = np.count_nonzero(coeffs) - np.count_nonzero(coeffs[::8, ::8])
     message_length = int(round(payload * nzAC))
     
@@ -88,13 +195,12 @@ def embed_message(spatial, payload, target_qf):
     original_message = bytes([random.randint(0, 255) for _ in range((message_length + 7) // 8)])
     
     # 4. 使用STC进行嵌入
-    stc = STC(stcode, coeffs.shape[0] // 8)
-    rho_p1 = channel_distortion.copy()
-    rho_m1 = channel_distortion.copy()
-    stego_coeffs = stc.embed(coeffs, rho_p1, original_message)
+    # stc = STC(stcode, coeffs.shape[0] // 8)
+    stc = STC(stcode, k)
+    stego_coeffs = stc.embed(coeffs, channel_distortion.copy(), original_message)
     
     # 5. 将系数转换回空域图像
-    stego_spatial = dct_to_image(stego_coeffs)
+    stego_spatial = dct_to_image(stego_coeffs,use_quantization=True,scaled_Q=Q_table)
     
     return stego_spatial, original_message
 
@@ -109,14 +215,14 @@ def extract_message(attacked_spatial, payload, target_qf):
     height, width = attacked_spatial.shape
     
     # 将图像转换为JPEG系数
-    coeffs,_ = image_to_dct(attacked_spatial)
+    coeffs,_ = image_to_dct(attacked_spatial,qf=target_qf)
     
     # 准备STC解码
-    stcode = [71, 109]
     nzAC = np.count_nonzero(coeffs) - np.count_nonzero(coeffs[::8, ::8])
     message_length = int(round(payload * nzAC))
     
-    stc = STC(stcode, coeffs.shape[0] // 8)
+    # stc = STC(stcode, coeffs.shape[0] // 8)
+    stc = STC(stcode, k)
     extracted_message = stc.extract(coeffs)
     
     # 截取正确长度的消息
@@ -160,7 +266,7 @@ def calculate_ber(original_msg, extracted_msg):
             xor_result = original_msg[i] ^ extracted_msg[i]
             error_bits += bin(xor_result).count('1')
         else:
-            error_bits += 8
+            error_bits += 0
     
     if len(original_msg) > len(extracted_msg):
         error_bits += 8 * (len(original_msg) - len(extracted_msg))
@@ -182,11 +288,12 @@ def process_image(args):
             image = np.mean(image, axis=2).astype(np.uint8)
         
         # 2. 嵌入消息
-        stego_image, original_msg = embed_message(image, payload, target_qf)
+        stego_image, original_msg = embed_message(image, payload, target_qf, attack_qf)
         
         # 3. JPEG攻击
-        for qf in range(target_qf+1, 96) if target_qf < 95 else [95]:
+        for qf in range(96,target_qf+1,-1) if target_qf < 95 else [95]:
             attacked_image = jpeg_attack(stego_image, qf)
+        # attacked_image = jpeg_attack(stego_image, attack_qf)
         
         # 4. 提取消息
         extracted_msg = extract_message(attacked_image, payload, target_qf)
@@ -280,8 +387,8 @@ if __name__ == "__main__":
     
     # 实验参数设置
     payloads = [0.1, 0.2, 0.3]  # 嵌入率(bits per non-zero AC coefficient)
-    target_qf = 70   # 目标JPEG质量因子,即用于计算失真代价函数的JPEG质量因子，若选70则会计算71到95的jpeg压缩的信道失真
-    attack_qf = 70    # 攻击JPEG质量因子，同上，选70则会使用71到95的jpeg压缩攻击
+    target_qf = 70      # 目标JPEG质量因子,即用于计算失真代价函数的JPEG质量因子，若选70则会计算71到95的jpeg压缩的信道失真
+    attack_qf = 80      # 攻击JPEG质量因子，同上，选70则会使用71到95的jpeg压缩攻击
     
     # 批量处理图像
     batch_process(pgm_dir, output_csv, payloads, target_qf, attack_qf)

@@ -36,6 +36,11 @@ import sys
 import random
 import numpy as np
 
+# 原本代码中STC嵌入的逻辑是，从起点开始，每m*k长度的载体中都要插入m长度的秘密信息
+# 但是有些连续的m*k长度的载体块中所有的cost都很大，整个块都不适合插入
+# 改进的方案就是统计每个载体块的cost，找到其均值或者中位数，以它作为阈值
+# 如果某载体块计算出cost大于阈值，那么不允许嵌入，继续进行下一轮，否则允许嵌入
+
 class STC:
     def __init__(self, stcode, k):
         # {{{
@@ -183,6 +188,9 @@ class STC:
         ml = np.sum(self.code_shift)
         message_bits = np.array(self._bytes_to_bits(message))
 
+        changed_blocks = list()
+        min_cost_list = list()
+
         i = 0
         j = 0
         y = x.copy()
@@ -191,12 +199,15 @@ class STC:
             m_chunk = message_bits[j:j+ml][:,np.newaxis]
             w_chunk = w[i:i+self.code_n][:,np.newaxis]
             y_chunk, min_cost, _ = self._dual_viterbi(x_chunk, w_chunk, m_chunk)
+            min_cost_list.append(min_cost)
+            changed_blocks.append(i//self.code_n)
             idx = x_chunk[:,0] != y_chunk[:,0]
             y[i:i+self.code_n][idx] += 1
             i += self.code_n
             j += ml
             if i+self.code_n>len(x) or j+ml>len(message_bits):
                 break
+        min_cost_list = np.array(min_cost_list)
         return np.vstack(y).reshape(shape)
         # }}}
 
